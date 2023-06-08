@@ -1,0 +1,256 @@
+#!/usr/bin/env python
+import rospy
+import time
+from std_msgs.msg import Bool, String, Int16
+from vitulus_msgs.msg import Mower, Power_status
+import sys
+import signal
+import serial
+
+
+class Node:
+
+    def __init__(self):
+        self.pub_status = rospy.Publisher('status', Mower, queue_size=10)
+        self.pub_pm_set_bat_out = rospy.Publisher('/pm/set_bat_out_switch', Bool, queue_size=10)
+        self.sub_set_home = rospy.Subscriber("set_home", Bool, self.callback_set_home)
+        self.sub_set_cali = rospy.Subscriber("set_calibrate", Bool, self.callback_set_cali)
+        self.sub_set_motor_rpm = rospy.Subscriber("set_motor_rpm", Int16, self.callback_set_motor_rpm)
+        self.sub_set_motor_dir = rospy.Subscriber("set_motor_dir", String, self.callback_set_motor_dir)
+        self.sub_set_motor_on = rospy.Subscriber("set_motor_on", Bool, self.callback_set_motor_on)
+        self.sub_set_power = rospy.Subscriber("set_power", Bool, self.callback_set_power)
+        self.sub_set_cut_height = rospy.Subscriber("set_cut_height", Int16, self.callback_set_cut_height)
+        self.sub_pm_power_status = rospy.Subscriber("/pm/power_status", Power_status, self.callback_pm_power_status)
+        self.port = None
+        # self.init_mower()
+        self.timer_read_serial = rospy.Timer(rospy.Duration(1.0 / 5), self.read_serial)
+        self.status = "INIT"
+        self.mrpm = 0
+        self.srpm = 0
+        self.mdir = "UNK"
+        self.cuth = 0
+        self.maxh = 0
+        self.bat_out_switch = False
+        self.stop_power = False
+        self.start_power = False
+        self.mower_on = False
+
+    def init_mower(self):
+        if self.port:
+            self.port.close()
+
+        rospy.loginfo("[{}] Connecting to mower serial 500000 baud.".format(rospy.get_caller_id()))
+        self.port = serial.Serial(port='/dev/mower', baudrate=500000, timeout=1.0)
+        self.port.setDTR(0)
+        self.port.setDTR(1)  # reset arduino
+        rospy.loginfo("[{}] Mower serial connected.".format(rospy.get_caller_id()))
+
+    def home(self):
+        self.port.write("HOME0001\n".encode())
+
+    def calibration(self):
+        self.port.write("CALI0001\n".encode())
+
+    def set_motor_state(self, state=False):
+        if state:
+            self.port.write("MOTO0001\n".encode())
+        else:
+            self.port.write("MOTO0000\n".encode())
+
+    def set_motor_direction(self, dir=1):
+        if dir:
+            self.port.write("MDIR0001\n".encode()) # right
+        else:
+            self.port.write("MDIR0000\n".encode()) # left
+
+    def set_motor_rpm(self, rpm=1):
+        cmd = "MRPM{:04d}\n".format(rpm)
+        self.port.write(cmd.encode())
+
+    def set_height(self, height):
+        cmd = "CUTH{:04d}\n".format(height)
+        self.port.write(cmd.encode())
+
+    def read_serial(self, event=False):
+        # print(event)
+        if self.port != None:
+            bytesToRead = self.port.inWaiting()
+            if bytesToRead > 0:
+                data = self.port.read(bytesToRead)  # .decode("iso8859_1")
+                data = data.split(b"\r\n")
+                msgs = []
+                for msg in data:
+                    if msg:
+                        # print(str(msg.decode('utf-8')))
+                        msg = msg.decode('utf-8')
+                        msgs.append(msg.split("|"))
+
+                self.set_msgs(msgs)
+
+    def set_msgs(self, msgs):
+        for msg in msgs:
+            if len(msg) == 2:
+                ## LOG
+                if msg[0] == "LOG":
+                    rospy.loginfo("[{}] {}".format(
+                        rospy.get_caller_id(), msg[1]))
+                ## mower status R-motor run, W-wait, E-motor error, P-going to position, H-going home, C-calibrating
+                if msg[0] == "S":
+                    if msg[1] == 'R':
+                        self.status = "RUN"
+                    if msg[1] == 'W':
+                        self.status = "WAIT"
+                    if msg[1] == 'E':
+                        self.status = "ERROR"
+                    if msg[1] == 'P':
+                        self.status = "CHANGE_HEIGHT"
+                    if msg[1] == 'H':
+                        self.status = "HOME"
+                    if msg[1] == 'C':
+                        self.status = "CALIBRATING"
+                ## max height
+                if msg[0] == "MAXH":
+                    self.maxh = int(msg[1])
+                ## current height
+                if msg[0] == "CUTH":
+                    self.cuth = int(msg[1])
+                ## current height small
+                if self.status == "CHANGE_HEIGHT":
+                    if msg[0] == "C":
+                        self.cuth = int(msg[1])
+                ## motor direction
+                if msg[0] == "MDIR":
+                    if msg[1] == '1':
+                        self.mdir = "RIGHT"
+                    if msg[1] == '0':
+                        self.mdir = "LEFT"
+                ## motor rpm
+                if msg[0] == "MRPM":
+                    self.mrpm = int(msg[1])
+
+                ## motor rpm setpoint
+                if msg[0] == "SRPM":
+                    self.srpm = int(msg[1])
+
+
+
+
+
+
+    def publish_mower_status(self):
+        msg = Mower()
+        msg.header.stamp = rospy.Time.now()
+        msg.status = self.status
+        msg.moto_dir = self.mdir
+        msg.moto_rpm = self.mrpm
+        msg.setpoint_rpm = self.srpm
+        msg.current_height = self.cuth
+        msg.max_height = self.maxh
+        self.pub_status.publish(msg)
+
+    def callback_set_home(self, msg):
+        if msg.data:
+            self.home()
+
+
+    def callback_set_motor_rpm(self, msg):
+        self.set_motor_rpm(msg.data)
+
+
+    def callback_set_cali(self, msg):
+        if msg.data:
+            self.calibration()
+
+    def callback_set_motor_dir(self, msg):
+        if msg.data == "RIGHT":
+            self.set_motor_direction(1)
+        if msg.data == "LEFT":
+            self.set_motor_direction(0)
+
+    def callback_set_motor_on(self, msg):
+        self.set_motor_state(msg.data)
+
+    def callback_set_cut_height(self, msg):
+        self.set_height(msg.data)
+
+    def callback_pm_power_status(self, msg):
+        self.bat_out_switch = msg.bat_out_switch
+
+    def callback_set_power(self, msg):
+        if msg.data:
+            self.start_power = True
+        else:
+            self.stop_power = True
+
+
+
+
+
+
+
+
+
+
+
+
+
+if __name__ == '__main__':
+    try:
+        rospy.init_node('mower_node')
+        rospy.loginfo("[{}] Initialising...".format(rospy.get_caller_id()))
+        node = Node()
+        r = rospy.Rate(1)  # Hz
+
+        def signal_handler(signum, frame):
+            rospy.signal_shutdown("end")
+            new_msg = Bool()
+            new_msg.data = False
+            node.pub_pm_set_bat_out.publish(new_msg)
+            if node.port:
+                node.port.close()
+            sys.exit(0)
+        signal.signal(signal.SIGINT, signal_handler)
+
+        first_run = True
+        node.stop_power = True
+        while not rospy.is_shutdown():
+
+            if node.stop_power:
+                new_msg = Bool()
+                new_msg.data = False
+                node.pub_pm_set_bat_out.publish(new_msg)
+                rospy.loginfo("[{}] Wait for Power module disable battery power output...".format(rospy.get_caller_id()))
+                while node.bat_out_switch:
+                    time.sleep(0.3)
+                rospy.loginfo("[{}] Battery power output disabled.".format(rospy.get_caller_id()))
+                node.mower_on = False
+                node.stop_power = False
+                if (node.port != None):
+                    node.port.close()
+                    node.port = None
+
+            if node.start_power:
+                node.status = "INIT"
+                new_msg = Bool()
+                new_msg.data = True
+                node.pub_pm_set_bat_out.publish(new_msg)
+                rospy.loginfo("[{}] Wait for Power module enable battery power output...".format(rospy.get_caller_id()))
+                while not node.bat_out_switch:
+                    time.sleep(0.3)
+                rospy.loginfo("[{}] Battery power output enabled.".format(rospy.get_caller_id()))
+                node.mower_on = True
+                node.start_power = False
+                node.init_mower()
+
+            if not node.mower_on:
+                node.status = "OFF"
+            node.publish_mower_status()
+            # print(node.status)
+            # print(node.mrpm)
+            # print(node.mdir)
+            # print(node.maxh)
+            # print(node.cuth)
+            r.sleep()
+
+    except rospy.ROSInterruptException:
+        rospy.logerr("[{}] error.".format(rospy.get_caller_id()))
