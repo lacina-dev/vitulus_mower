@@ -11,16 +11,4 @@
 
     </group>
 
-<!--    <include file="$(find vitulus_pkg_template)/launch/template.launch">-->
-<!--&lt;!&ndash;        <param name="prm_name" value="prm_value"/>&ndash;&gt;-->
-<!--&lt;!&ndash;        <remap from="/topic" to="/another_topic" />&ndash;&gt;-->
-<!--    </include>-->
-
-    <!--##### Show in Rviz #####-->
-    <!--    <node name="rviz"-->
-    <!--              pkg="rviz"-->
-    <!--              type="rviz"-->
-    <!--              args="-d $(find vitulus_imu)/rviz/imu.rviz"-->
-    <!--              required="false" />-->
-
 </launch>

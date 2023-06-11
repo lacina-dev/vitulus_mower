@@ -21,8 +21,8 @@ class Node:
         self.sub_set_power = rospy.Subscriber("set_power", Bool, self.callback_set_power)
         self.sub_set_cut_height = rospy.Subscriber("set_cut_height", Int16, self.callback_set_cut_height)
         self.sub_pm_power_status = rospy.Subscriber("/pm/power_status", Power_status, self.callback_pm_power_status)
+        self.sub_set_cmd = rospy.Subscriber("set_cmd", String, self.callback_set_cmd)
         self.port = None
-        # self.init_mower()
         self.timer_read_serial = rospy.Timer(rospy.Duration(1.0 / 5), self.read_serial)
         self.status = "INIT"
         self.mrpm = 0
@@ -41,7 +41,7 @@ class Node:
 
         rospy.loginfo("[{}] Connecting to mower serial 500000 baud.".format(rospy.get_caller_id()))
         self.port = serial.Serial(port='/dev/mower', baudrate=500000, timeout=1.0)
-        self.port.setDTR(0)
+        self.port.setDTR(0)  # reset arduino
         self.port.setDTR(1)  # reset arduino
         rospy.loginfo("[{}] Mower serial connected.".format(rospy.get_caller_id()))
 
@@ -71,12 +71,19 @@ class Node:
         cmd = "CUTH{:04d}\n".format(height)
         self.port.write(cmd.encode())
 
+    def set_cmd(self, cmd):
+        if len(cmd) == 8:
+            cmd = "{}\n".format(cmd)
+            print(cmd)
+            self.port.write(cmd.encode())
+
+
     def read_serial(self, event=False):
         # print(event)
         if self.port != None:
             bytesToRead = self.port.inWaiting()
             if bytesToRead > 0:
-                data = self.port.read(bytesToRead)  # .decode("iso8859_1")
+                data = self.port.read(bytesToRead)
                 data = data.split(b"\r\n")
                 msgs = []
                 for msg in data:
@@ -127,15 +134,9 @@ class Node:
                 ## motor rpm
                 if msg[0] == "MRPM":
                     self.mrpm = int(msg[1])
-
                 ## motor rpm setpoint
                 if msg[0] == "SRPM":
                     self.srpm = int(msg[1])
-
-
-
-
-
 
     def publish_mower_status(self):
         msg = Mower()
@@ -152,10 +153,8 @@ class Node:
         if msg.data:
             self.home()
 
-
     def callback_set_motor_rpm(self, msg):
         self.set_motor_rpm(msg.data)
-
 
     def callback_set_cali(self, msg):
         if msg.data:
@@ -182,16 +181,8 @@ class Node:
         else:
             self.stop_power = True
 
-
-
-
-
-
-
-
-
-
-
+    def callback_set_cmd(self, msg):
+        self.set_cmd(msg.data)
 
 
 if __name__ == '__main__':
@@ -207,6 +198,7 @@ if __name__ == '__main__':
             new_msg.data = False
             node.pub_pm_set_bat_out.publish(new_msg)
             if node.port:
+                node.set_motor_state(False)
                 node.port.close()
             sys.exit(0)
         signal.signal(signal.SIGINT, signal_handler)
@@ -226,6 +218,7 @@ if __name__ == '__main__':
                 node.mower_on = False
                 node.stop_power = False
                 if (node.port != None):
+                    node.set_motor_state(False)
                     node.port.close()
                     node.port = None
 
