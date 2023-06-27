@@ -13,6 +13,7 @@ class Node:
     def __init__(self):
         self.pub_status = rospy.Publisher('status', Mower, queue_size=10)
         self.pub_pm_set_bat_out = rospy.Publisher('/pm/set_bat_out_switch', Bool, queue_size=10)
+        self.pub_pm_play_melody = rospy.Publisher('/pm/play_melody', Int16, queue_size=10)
         self.sub_set_home = rospy.Subscriber("set_home", Bool, self.callback_set_home)
         self.sub_set_cali = rospy.Subscriber("set_calibrate", Bool, self.callback_set_cali)
         self.sub_set_motor_rpm = rospy.Subscriber("set_motor_rpm", Int16, self.callback_set_motor_rpm)
@@ -53,6 +54,10 @@ class Node:
 
     def set_motor_state(self, state=False):
         if state:
+            msg = Int16()
+            msg.data = 4  # 4 - Horn
+            self.pub_pm_play_melody.publish(msg)
+            time.sleep(3.5)
             self.port.write("MOTO0001\n".encode())
         else:
             self.port.write("MOTO0000\n".encode())
