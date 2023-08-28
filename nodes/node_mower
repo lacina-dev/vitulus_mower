@@ -219,6 +219,7 @@ if __name__ == '__main__':
                 rospy.loginfo("[{}] Wait for Power module disable battery power output...".format(rospy.get_caller_id()))
                 while node.bat_out_switch:
                     time.sleep(0.3)
+                    node.pub_pm_set_bat_out.publish(new_msg)
                 rospy.loginfo("[{}] Battery power output disabled.".format(rospy.get_caller_id()))
                 node.mower_on = False
                 node.stop_power = False
