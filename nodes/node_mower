@@ -43,7 +43,9 @@ class Node:
         rospy.loginfo("[{}] Connecting to mower serial 500000 baud.".format(rospy.get_caller_id()))
         self.port = serial.Serial(port='/dev/mower', baudrate=500000, timeout=1.0)
         self.port.setDTR(0)  # reset arduino
+        time.sleep(0.5)
         self.port.setDTR(1)  # reset arduino
+        time.sleep(0.5)
         rospy.loginfo("[{}] Mower serial connected.".format(rospy.get_caller_id()))
 
     def home(self):
@@ -101,11 +103,12 @@ class Node:
 
     def set_msgs(self, msgs):
         for msg in msgs:
+            # print("STATUS_MSG: {}".format(msg))
+            rospy.loginfo("[{}] STATUS_MSG: {}".format(rospy.get_caller_id(), msg))
             if len(msg) == 2:
                 ## LOG
                 if msg[0] == "LOG":
-                    rospy.loginfo("[{}] {}".format(
-                        rospy.get_caller_id(), msg[1]))
+                    rospy.loginfo("[{}] {}".format(rospy.get_caller_id(), msg[1]))
                 ## mower status R-motor run, W-wait, E-motor error, P-going to position, H-going home, C-calibrating
                 if msg[0] == "S":
                     if msg[1] == 'R':
