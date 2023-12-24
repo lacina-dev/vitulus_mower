@@ -11,7 +11,7 @@ import serial
 class Node:
 
     def __init__(self):
-        self.pub_status = rospy.Publisher('status', Mower, queue_size=10)
+        self.pub_status = rospy.Publisher('status', Mower, queue_size=10, latch=True)
         self.pub_pm_set_bat_out = rospy.Publisher('/pm/set_bat_out_switch', Bool, queue_size=10)
         self.pub_pm_play_melody = rospy.Publisher('/pm/play_melody', Int16, queue_size=10)
         self.sub_set_home = rospy.Subscriber("set_home", Bool, self.callback_set_home)
@@ -104,7 +104,7 @@ class Node:
     def set_msgs(self, msgs):
         for msg in msgs:
             # print("STATUS_MSG: {}".format(msg))
-            rospy.loginfo("[{}] STATUS_MSG: {}".format(rospy.get_caller_id(), msg))
+            # rospy.loginfo("[{}] STATUS_MSG: {}".format(rospy.get_caller_id(), msg))
             if len(msg) == 2:
                 ## LOG
                 if msg[0] == "LOG":
