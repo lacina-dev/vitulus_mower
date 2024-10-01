@@ -1,0 +1,46 @@
+#!/usr/bin/env python
+import rospy
+import time
+from std_msgs.msg import Bool, String
+from vitulus_msgs.msg import Power_status
+import sys
+import signal
+
+
+class Node:
+
+    def __init__(self):
+        self.pub_pm_batt_switch = rospy.Publisher('/mower/pm/batt_switch', Bool, queue_size=10)
+        self.sub_pm_status = rospy.Subscriber("/pm/power_status", Power_status, self.callback_pm_status)
+        self.batt_switch = False
+
+    def publish_pm_batt_switch(self):
+        msg = Bool()
+        msg.data = self.batt_switch
+        self.pub_pm_batt_switch.publish(msg)
+
+    def callback_pm_status(self, msg):
+        self.batt_switch = msg.bat_out_switch
+        # rospy.loginfo("<{}> batt_out_switch: {}".format(rospy.get_caller_id(), msg.bat_out_switch))
+
+
+
+
+if __name__ == '__main__':
+    try:
+        rospy.init_node('mower_proxy_node')
+        rospy.loginfo("<{}> Initialising...".format(rospy.get_caller_id()))
+        node = Node()
+        r = rospy.Rate(1)  # Hz
+
+        def signal_handler():
+            rospy.signal_shutdown("end")
+            sys.exit(0)
+        signal.signal(signal.SIGINT, signal_handler)
+
+        while not rospy.is_shutdown():
+            node.publish_pm_batt_switch()
+            r.sleep()
+
+    except rospy.ROSInterruptException:
+        rospy.logerr("<{}> error.".format(rospy.get_caller_id()))
