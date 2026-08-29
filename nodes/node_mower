@@ -6,6 +6,8 @@ from vitulus_msgs.msg import Mower, Power_status
 import sys
 import signal
 import serial
+import os
+import json
 
 
 class Node:
@@ -35,6 +37,66 @@ class Node:
         self.stop_power = False
         self.start_power = False
         self.mower_on = False
+        # settings persistence (2026-08-15): remember the last commanded cut
+        # height + RPM setpoint across restarts and re-apply them on every
+        # mower power-on (the Arduino forgets both on its DTR reset). NOTE:
+        # program (smach) and manual (UI) sets arrive on the same topics and
+        # cannot be told apart here, so "last commanded" wins either way — a
+        # program re-sends its own values when it starts, so this only defines
+        # the power-on default.
+        self.persist = self._load_persist()
+        # guards against the mission race: if smach (or the UI) already sent an
+        # explicit rpm/height between power-on and our restore, the explicit
+        # command wins and the restore for that value is skipped
+        self._rpm_cmd_seen = False
+        self._height_cmd_seen = False
+
+    PERSIST_FILE = os.path.expanduser('~/.vitulus/mower/last_settings.json')
+
+    def _load_persist(self):
+        try:
+            with open(self.PERSIST_FILE) as f:
+                d = json.load(f)
+            if isinstance(d, dict):
+                return d
+        except Exception:
+            pass
+        return {}
+
+    def _save_persist(self, key, value):
+        self.persist[key] = value
+        try:
+            d = os.path.dirname(self.PERSIST_FILE)
+            if not os.path.isdir(d):
+                os.makedirs(d)
+            tmp = self.PERSIST_FILE + '.tmp'
+            with open(tmp, 'w') as f:
+                json.dump(self.persist, f)
+            os.replace(tmp, self.PERSIST_FILE)
+        except Exception as e:
+            rospy.logwarn("[{}] settings persist failed: {}".format(rospy.get_caller_id(), e))
+
+    def apply_persisted_settings(self):
+        # Called right after init_mower() on power-on; sets only the RPM
+        # SETPOINT (the blade stays off until an explicit motor-on) and moves
+        # the deck to the remembered height. Skips any value for which an
+        # explicit command already arrived since this power-on (mission race).
+        try:
+            rpm = self.persist.get('motor_rpm')
+            if (not self._rpm_cmd_seen and
+                    isinstance(rpm, int) and 0 < rpm <= 9999):
+                self.set_motor_rpm(rpm)
+                rospy.loginfo("[{}] restored persisted RPM setpoint {}.".format(
+                    rospy.get_caller_id(), rpm))
+            height = self.persist.get('cut_height')
+            if (not self._height_cmd_seen and
+                    isinstance(height, int) and 0 < height <= 9999):
+                self.set_height(height)
+                rospy.loginfo("[{}] restored persisted cut height {}.".format(
+                    rospy.get_caller_id(), height))
+        except Exception as e:
+            rospy.logwarn("[{}] restore of persisted settings failed: {}".format(
+                rospy.get_caller_id(), e))
 
     def init_mower(self):
         if self.port:
@@ -162,6 +224,12 @@ class Node:
             self.home()
 
     def callback_set_motor_rpm(self, msg):
+        # persist BEFORE the serial write so the wish survives even when the
+        # mower is currently powered off (port closed -> the write throws);
+        # rpm 0 is a stop, not a preference — don't remember it
+        self._rpm_cmd_seen = True
+        if int(msg.data) > 0:
+            self._save_persist('motor_rpm', int(msg.data))
         self.set_motor_rpm(msg.data)
 
     def callback_set_cali(self, msg):
@@ -178,6 +246,13 @@ class Node:
         self.set_motor_state(msg.data)
 
     def callback_set_cut_height(self, msg):
+        # safe_blade_shutdown parks the deck at max_height after every mission
+        # — that's a park command, not the user's cutting preference, so skip
+        # persisting anything at/above the known max height (and 0/negative).
+        self._height_cmd_seen = True
+        h = int(msg.data)
+        if h > 0 and (self.maxh <= 0 or h < self.maxh):
+            self._save_persist('cut_height', h)
         self.set_height(msg.data)
 
     def callback_pm_power_status(self, msg):
@@ -233,6 +308,10 @@ if __name__ == '__main__':
 
             if node.start_power:
                 node.status = "INIT"
+                # settings persistence: fresh power-on — explicit commands
+                # from now on win over the restore below
+                node._rpm_cmd_seen = False
+                node._height_cmd_seen = False
                 new_msg = Bool()
                 new_msg.data = True
                 node.pub_pm_set_bat_out.publish(new_msg)
@@ -243,6 +322,11 @@ if __name__ == '__main__':
                 node.mower_on = True
                 node.start_power = False
                 node.init_mower()
+                # settings persistence: give the Arduino a moment to finish
+                # booting after the DTR reset, then re-apply the remembered
+                # RPM setpoint + cut height (blade stays off).
+                time.sleep(2.0)
+                node.apply_persisted_settings()
 
             if not node.mower_on:
                 node.status = "OFF"
