@@ -10,6 +10,11 @@
 <!--            <param name="prm_name" value="prm_value"/>-->
 <!--            <remap from="/topic" to="/another_topic" />-->
         </node>
+
+        <!-- pamatovani uzivatelske vysky sekani a RPM pres vypnuti/restart
+             (~/.vitulus/mower/preferences.json); po startu desky obnovi vysku
+             a RPM setpoint, motor noze nikdy nezapina -->
+        <node name="node_mower_prefs" pkg="vitulus_mower" type="node_mower_prefs" respawn="true" respawn_delay="2" output="screen"/>
     </group>
 </launch>
 

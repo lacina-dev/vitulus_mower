@@ -1,0 +1,169 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""node_mower_prefs - sekacka si pamatuje uzivatelskou vysku sekani a RPM.
+
+Deska sekacky (rosserial /mower/node_mower) po zapnuti napajeni zapomene
+vysku i RPM (reset, HOME na max_height, RPM z EEPROM defaultu). Tento node:
+
+* uklada UZIVATELSKOU preferenci do ~/.vitulus/mower/preferences.json
+  (atomicky) - zdroje:
+    - /mower/pref/set_cut_height, /mower/pref/set_motor_rpm (std_msgs/Int16)
+      = UI Settings > Mower; hodnota se ulozi a hned preposle desce,
+    - primo /mower/set_cut_height|set_motor_rpm od rucnich ovladacu
+      (~manual_sources: joystick DS4, displej robota), mimo program sekani;
+  vyska/RPM od programu (mower_smach: zona/program, parkovani pri STOPu),
+  safety/supervisoru a ostatnich se NEukladaji - jsou docasne;
+* po kazdem startu/reconnectu desky (reset, "Unable to sync" -> znovu
+  pripojeno, OFF -> ON), az deska stoji READY na max_height, posle ulozenou
+  vysku (jen polohuje nuz) a RPM jako hodnotu setpointu - motor noze NIKDY
+  nezapina (zadny /mower/set_motor_on); viz node_mower.prefs.RestoreLogic;
+* publikuje /mower/preferences (std_msgs/String JSON, latched), aby UI
+  ukazalo ulozenou hodnotu, i kdyz sekacka mlci.
+"""
+
+import json
+import threading
+
+import rospy
+from std_msgs.msg import Bool, Int16, String
+from vitulus_msgs.msg import Mower
+
+from node_mower.prefs import (DEFAULT_PATH, PrefsStore, RestoreLogic,
+                              valid_height, valid_rpm)
+
+
+def _caller(msg):
+    try:
+        return msg._connection_header.get('callerid', '')
+    except AttributeError:
+        return ''
+
+
+class MowerPrefsNode(object):
+
+    def __init__(self):
+        self.lock = threading.RLock()
+        path = rospy.get_param('~path', DEFAULT_PATH)
+        self.manual_sources = set(rospy.get_param(
+            '~manual_sources', ['/ds4/node_ds4', '/nextion/nextion_lcd']))
+        self.store = PrefsStore(path)
+        self.logic = RestoreLogic(self.store)
+        self.me = rospy.get_name()
+        self.max_height = 0
+        self.last_status = None
+        self.started = rospy.get_time()
+
+        self.pub_height = rospy.Publisher('/mower/set_cut_height', Int16, queue_size=5)
+        self.pub_rpm = rospy.Publisher('/mower/set_motor_rpm', Int16, queue_size=5)
+        self.pub_prefs = rospy.Publisher('/mower/preferences', String, queue_size=1, latch=True)
+
+        rospy.Subscriber('/mower/status', Mower, self.cb_status, queue_size=5)
+        rospy.Subscriber('/mower_smach/busy', Bool, self.cb_busy, queue_size=5)
+        rospy.Subscriber('/mower/set_power', Bool, self.cb_power, queue_size=5)
+        rospy.Subscriber('/mower/pref/set_cut_height', Int16, self.cb_pref_height, queue_size=5)
+        rospy.Subscriber('/mower/pref/set_motor_rpm', Int16, self.cb_pref_rpm, queue_size=5)
+        rospy.Subscriber('/mower/set_cut_height', Int16, self.cb_direct_height, queue_size=10)
+        rospy.Subscriber('/mower/set_motor_rpm', Int16, self.cb_direct_rpm, queue_size=10)
+        rospy.Timer(rospy.Duration(1.0), self.cb_tick)
+
+        self.publish_prefs()
+        rospy.loginfo('[mower_prefs] saved preference: height=%s mm rpm=%s (%s)',
+                      self.store.cut_height, self.store.motor_rpm, path)
+
+    # --- stav pro UI ----------------------------------------------------
+    def publish_prefs(self):
+        d = dict(self.store.data)
+        d['last_restore'] = self.logic.last_result or ''
+        self.pub_prefs.publish(String(json.dumps(d, sort_keys=True)))
+
+    def _save(self, key, value, source):
+        try:
+            changed = self.store.set(key, value, source)
+        except Exception as e:  # noqa: BLE001 - zapis nesmi shodit node
+            rospy.logwarn('[mower_prefs] cannot save %s=%s: %s', key, value, e)
+            return
+        if changed:
+            rospy.loginfo('[mower_prefs] saved %s=%s (source %s)', key, value, source)
+        self.publish_prefs()
+
+    # --- uzivatelske preference -------------------------------------------
+    def cb_pref_height(self, msg):
+        with self.lock:
+            h = int(msg.data)
+            if not valid_height(h, self.max_height):
+                rospy.logwarn('[mower_prefs] ignoring preference height %s (20..%s)',
+                              h, self.max_height or '?')
+                return
+            self._save('cut_height', h, 'ui')
+            self.logic.on_command('height')
+            self.pub_height.publish(Int16(h))
+
+    def cb_pref_rpm(self, msg):
+        with self.lock:
+            r = int(msg.data)
+            if not valid_rpm(r):
+                rospy.logwarn('[mower_prefs] ignoring preference rpm %s', r)
+                return
+            self._save('motor_rpm', r, 'ui')
+            self.logic.on_command('rpm')
+            self.pub_rpm.publish(Int16(r))
+
+    def _direct(self, msg, kind):
+        caller = _caller(msg)
+        if caller == self.me:
+            return
+        with self.lock:
+            self.logic.on_command(kind)
+            if caller not in self.manual_sources or self.logic.busy:
+                return  # program / parkovani / supervisor = docasne, neukladat
+            v = int(msg.data)
+            if kind == 'height':
+                # max_height = parkovaci poloha, ne preference
+                if valid_height(v, self.max_height) and (self.max_height <= 0 or v < self.max_height):
+                    self._save('cut_height', v, caller.strip('/'))
+            elif valid_rpm(v):
+                self._save('motor_rpm', v, caller.strip('/'))
+
+    def cb_direct_height(self, msg):
+        self._direct(msg, 'height')
+
+    def cb_direct_rpm(self, msg):
+        self._direct(msg, 'rpm')
+
+    # --- stav desky / mise ------------------------------------------------
+    def cb_busy(self, msg):
+        with self.lock:
+            self.logic.busy = bool(msg.data)
+
+    def cb_power(self, msg):
+        if _caller(msg) == self.me:
+            return
+        with self.lock:
+            self.logic.on_power_cmd(msg.data)
+
+    def cb_tick(self, _ev):
+        with self.lock:
+            self.logic.tick(rospy.get_time())
+
+    def cb_status(self, msg):
+        with self.lock:
+            if msg.max_height > 0:
+                self.max_height = int(msg.max_height)
+            before = self.logic.last_result
+            actions = self.logic.on_status(rospy.get_time(), msg.status, msg.current_height,
+                                           msg.max_height, msg.setpoint_rpm, msg.moto_rpm)
+            for kind, value in actions:
+                if kind == 'height':
+                    self.pub_height.publish(Int16(int(value)))
+                elif kind == 'rpm':
+                    self.pub_rpm.publish(Int16(int(value)))
+                # jine akce RestoreLogic nevraci; motor noze se tu nikdy nezapina
+            if self.logic.last_result != before:
+                rospy.loginfo('[mower_prefs] %s', self.logic.last_result)
+                self.publish_prefs()
+
+
+if __name__ == '__main__':
+    rospy.init_node('node_mower_prefs')
+    MowerPrefsNode()
+    rospy.spin()

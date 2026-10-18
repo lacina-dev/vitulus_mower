@@ -83,6 +83,7 @@ install(DIRECTORY launch
 catkin_install_python(PROGRAMS
   nodes/node_mower
   nodes/node_mower_proxy
+  nodes/node_mower_prefs
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 

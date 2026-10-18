@@ -1,4 +1,8 @@
 #!/usr/bin/env python
+# LEGACY - tento node se NESPOUSTI: launch/mower.launch spousti pod jmenem
+# /mower/node_mower rosserial_python serial_node.py (firmware STM_MowerController).
+# Proto se pamatovani vysky/RPM pridane sem 15. 8. 2026 nikdy neaktivovalo.
+# Pamatovani vysky sekani a RPM resi nodes/node_mower_prefs.
 import rospy
 import time
 from std_msgs.msg import Bool, String, Int16
